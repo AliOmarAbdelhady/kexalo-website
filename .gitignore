@@ -47,3 +47,7 @@ next-env.d.ts
 # local testing artifacts
 /.playwright-mcp/
 *.tmp.mjs
+
+# local screenshots
+/*.png
+!public/**
