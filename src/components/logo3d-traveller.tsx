@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { createPortal } from "react-dom";
 import dynamic from "next/dynamic";
 import { useTheme } from "next-themes";
 import { Logo3DMotion } from "@/components/logo3d-scene";
@@ -49,6 +50,12 @@ export function LogoTraveller() {
     return () => cancelAnimationFrame(raf);
   }, [theme]);
 
+  // small screens render the scene IN the hero lockup (natively scrolled, zero lag);
+  // large screens use the fixed travelling overlay
+  const [isMobile, setIsMobile] = React.useState(false);
+  const [slotEl, setSlotEl] = React.useState<HTMLElement | null>(null);
+  const isMobileRef = React.useRef(false);
+
   const motionRef = React.useRef<Logo3DMotion>({
     u: 0,
     vel: 0,
@@ -58,7 +65,7 @@ export function LogoTraveller() {
     reduce: false,
     mobile: false,
   });
-  const [layout, setLayout] = React.useState({ side: 320, dpr: 2, ready: false });
+  const [layout, setLayout] = React.useState({ w: 320, h: 320, dpr: 2, ready: false });
 
   React.useEffect(() => {
     const reduceQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -66,11 +73,16 @@ export function LogoTraveller() {
     setReduce();
     reduceQuery.addEventListener("change", setReduce);
 
-    // on small screens the 3D model never travels — it stays part of the hero lockup
+    // on small screens the 3D model never travels — it lives inside the hero lockup
     const mobileQuery = window.matchMedia("(max-width: 767px)");
-    const setMobile = () => { motionRef.current.mobile = mobileQuery.matches; };
-    setMobile();
-    mobileQuery.addEventListener("change", setMobile);
+    const applyMobile = () => {
+      isMobileRef.current = mobileQuery.matches;
+      motionRef.current.mobile = mobileQuery.matches;
+      // rAF: setState in media-query callbacks is fine, but this keeps it out of sync effects
+      requestAnimationFrame(() => setIsMobile(mobileQuery.matches));
+    };
+    applyMobile();
+    mobileQuery.addEventListener("change", applyMobile);
 
     let vw = window.innerWidth;
     let vh = window.innerHeight;
@@ -78,17 +90,19 @@ export function LogoTraveller() {
     let modelH = 140;
     let maxScroll = 1;
 
-    // canvas must frame both the travelling size and the (bigger) hero park size;
-    // recomputed lazily because the hero entrance animation rescales the slot early on
+    // canvas sizing for the active mode; recomputed lazily because the hero entrance
+    // animation rescales the slot early on
     const computeSizes = () => {
       modelH = clamp(Math.min(vh * 0.17, vw * 0.26), 90, 170);
       const slot = document.getElementById("hero-logo-mark");
-      let parkH = modelH;
-      if (slot) {
-        const r = slot.getBoundingClientRect();
-        parkH = Math.max(40, Math.min(r.height, r.width / MODEL_ASPECT));
+      if (!slot) return { side, parkH: modelH, slotW: 0, slotH: 0 };
+      const r = slot.getBoundingClientRect();
+      const parkH = Math.max(40, Math.min(r.height, r.width / MODEL_ASPECT));
+      if (isMobileRef.current) {
+        // in-flow canvas exactly fills the mark slot
+        return { side: Math.round(r.height), parkH, slotW: r.width, slotH: r.height };
       }
-      return { side: Math.round(Math.max(modelH, parkH) * 2.24), parkH };
+      return { side: Math.round(Math.max(modelH, parkH) * 2.24), parkH, slotW: r.width, slotH: r.height };
     };
 
     const measure = () => {
@@ -97,18 +111,29 @@ export function LogoTraveller() {
       maxScroll = Math.max(1, document.documentElement.scrollHeight - vh);
       const { side: s, parkH } = computeSizes();
       side = s;
+      setSlotEl((prev) => prev ?? document.getElementById("hero-logo-mark"));
 
-      const k = 0.2782; // rendered model height per unit of WebGL group scale, as a fraction of `side`
-      motionRef.current.gTravel = clamp(modelH / (k * side), 0.3, 2.4);
-      motionRef.current.gPark = clamp(parkH / (k * side), 0.3, 2.4);
-
-      setLayout((prev) =>
-        Math.abs(prev.side - side) < 2 && prev.ready
-          ? prev
-          : { side, dpr: Math.min(3, (window.devicePixelRatio || 1) * 1.5), ready: true },
-      );
+      const k = 0.2782; // rendered model height per unit of WebGL group scale, as a fraction of canvas height
+      if (isMobileRef.current) {
+        const { slotW, slotH } = computeSizes();
+        motionRef.current.gPark = clamp(parkH / (k * slotH), 0.3, 2.4);
+        motionRef.current.gTravel = motionRef.current.gPark;
+        setLayout((prev) =>
+          prev.ready && Math.abs(prev.w - slotW) < 2 && Math.abs(prev.h - slotH) < 2
+            ? prev
+            : { w: Math.round(slotW), h: Math.round(slotH), dpr: Math.min(3, (window.devicePixelRatio || 1) * 1.5), ready: true },
+        );
+      } else {
+        motionRef.current.gTravel = clamp(modelH / (k * side), 0.3, 2.4);
+        motionRef.current.gPark = clamp(parkH / (k * side), 0.3, 2.4);
+        setLayout((prev) =>
+          prev.ready && Math.abs(prev.w - side) < 2 && Math.abs(prev.h - side) < 2
+            ? prev
+            : { w: side, h: side, dpr: Math.min(3, (window.devicePixelRatio || 1) * 1.5), ready: true },
+        );
+      }
     };
-    measure();
+    const initialRaf = requestAnimationFrame(measure);
     const ro = new ResizeObserver(measure);
     ro.observe(document.documentElement);
     window.addEventListener("resize", measure);
@@ -136,17 +161,23 @@ export function LogoTraveller() {
         if (Math.abs(next - side) > 2) measure();
       }
 
-      const wrap = wrapRef.current;
-      if (!wrap || side <= 0) return;
-
       const reduce = motionRef.current.reduce;
       const u = clamp(y / maxScroll, 0, 1);
-      // mobile (or reduced motion): always parked, sticks to the lockup while scrolling
+      // mobile / reduced motion: always parked — the in-flow canvas scrolls natively, zero lag
       const dock = reduce || motionRef.current.mobile ? 1 : smoothstep(clamp(1 - y / 150, 0, 1));
 
       motionRef.current.u = u;
       motionRef.current.vel = velEma;
       motionRef.current.dock = dock;
+
+      if (isMobileRef.current) {
+        // in-flow mode: the canvas is part of the hero — nothing to position
+        if (first) { first = false; }
+        return;
+      }
+
+      const wrap = wrapRef.current;
+      if (!wrap || side <= 0) return;
 
       // park position: the mark slot inside the centered hero lockup
       const slot = document.getElementById("hero-logo-mark");
@@ -207,23 +238,51 @@ export function LogoTraveller() {
         first = false;
         wrap.style.opacity = "1";
       }
-    };    raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
 
     return () => {
       cancelAnimationFrame(raf);
       ro.disconnect();
       window.removeEventListener("resize", measure);
       reduceQuery.removeEventListener("change", setReduce);
-      mobileQuery.removeEventListener("change", setMobile);
+      mobileQuery.removeEventListener("change", applyMobile);
+      cancelAnimationFrame(initialRaf);
     };
   }, []);
+
+  const scene = layout.ready ? (
+    <Logo3DScene motionRef={motionRef} theme={theme} brandHex={brandHex} dpr={layout.dpr} />
+  ) : null;
+
+  if (isMobile && slotEl) {
+    // in-flow: rendered inside the hero mark slot — the browser scrolls it natively (zero lag)
+    return createPortal(
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-0"
+        style={{ opacity: layout.ready ? 1 : 0, transition: "opacity 500ms" }}
+      >
+        <div
+          className="absolute inset-[-12%] rounded-full blur-2xl"
+          style={{
+            background:
+              "radial-gradient(circle at 50% 50%, color-mix(in oklch, var(--brand) 55%, transparent), transparent 65%)",
+            opacity: 0.55,
+          }}
+        />
+        {scene}
+      </div>,
+      slotEl,
+    );
+  }
 
   return (
     <div
       ref={wrapRef}
       aria-hidden
       className="pointer-events-none fixed top-0 left-0 z-40 opacity-0 transition-opacity duration-500 will-change-transform"
-      style={{ width: layout.side, height: layout.side }}
+      style={{ width: layout.w, height: layout.h }}
     >
       {/* mint halo behind the model */}
       <div
@@ -234,15 +293,7 @@ export function LogoTraveller() {
             "radial-gradient(circle at 50% 50%, color-mix(in oklch, var(--brand) 55%, transparent), transparent 65%)",
         }}
       />
-      {layout.ready ? (
-        <Logo3DScene
-          motionRef={motionRef}
-          theme={theme}
-          brandHex={brandHex}
-          side={layout.side}
-          dpr={layout.dpr}
-        />
-      ) : null}
+      {scene}
     </div>
   );
 }

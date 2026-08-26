@@ -175,13 +175,11 @@ export default function Logo3DScene({
   motionRef,
   theme,
   brandHex,
-  side,
   dpr,
 }: {
   motionRef: React.RefObject<Logo3DMotion>;
   theme: "dark" | "light";
   brandHex: string;
-  side: number; // canvas CSS size in px (square)
   dpr: number;
 }) {
   return (
@@ -189,7 +187,7 @@ export default function Logo3DScene({
       dpr={dpr} // fixed supersampling factor (can exceed devicePixelRatio for crispness)
       gl={{ antialias: true, alpha: true, powerPreference: "high-performance" }}
       camera={{ fov: 30, position: [0, 0, 10], near: 0.1, far: 100 }}
-      style={{ width: side, height: side, background: "transparent" }}
+      style={{ width: "100%", height: "100%", background: "transparent" }}
       onCreated={({ gl, scene }) => {
         // one-time renderer + studio environment setup
         gl.toneMapping = THREE.ACESFilmicToneMapping;
@@ -199,7 +197,7 @@ export default function Logo3DScene({
         pmrem.dispose();
       }}
     >
-      {/* model height in px = 0.2782 * side * group scale (see traveller's gTravel/gPark) */}
+      {/* model height in px = 0.2782 * canvasHeight * group scale (see traveller's gTravel/gPark) */}
       <group>
         <LogoModel motionRef={motionRef} theme={theme} brandHex={brandHex} />
       </group>
