@@ -15,6 +15,7 @@ export type Logo3DMotion = {
   gTravel: number; // WebGL group scale for the travelling size
   gPark: number; // WebGL group scale that fits the model over the hero mark slot
   reduce: boolean; // prefers-reduced-motion
+  mobile: boolean; // small screens: the model never travels, it sticks to the lockup
 };
 
 const X_COLOR_DARK = "#f1f3f7"; // white-silver metal on the dark site

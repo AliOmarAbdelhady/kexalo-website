@@ -56,6 +56,7 @@ export function LogoTraveller() {
     gTravel: 1,
     gPark: 1,
     reduce: false,
+    mobile: false,
   });
   const [layout, setLayout] = React.useState({ side: 320, dpr: 2, ready: false });
 
@@ -64,6 +65,12 @@ export function LogoTraveller() {
     const setReduce = () => { motionRef.current.reduce = reduceQuery.matches; };
     setReduce();
     reduceQuery.addEventListener("change", setReduce);
+
+    // on small screens the 3D model never travels — it stays part of the hero lockup
+    const mobileQuery = window.matchMedia("(max-width: 767px)");
+    const setMobile = () => { motionRef.current.mobile = mobileQuery.matches; };
+    setMobile();
+    mobileQuery.addEventListener("change", setMobile);
 
     let vw = window.innerWidth;
     let vh = window.innerHeight;
@@ -134,7 +141,8 @@ export function LogoTraveller() {
 
       const reduce = motionRef.current.reduce;
       const u = clamp(y / maxScroll, 0, 1);
-      const dock = reduce ? 1 : smoothstep(clamp(1 - y / 150, 0, 1));
+      // mobile (or reduced motion): always parked, sticks to the lockup while scrolling
+      const dock = reduce || motionRef.current.mobile ? 1 : smoothstep(clamp(1 - y / 150, 0, 1));
 
       motionRef.current.u = u;
       motionRef.current.vel = velEma;
@@ -206,6 +214,7 @@ export function LogoTraveller() {
       ro.disconnect();
       window.removeEventListener("resize", measure);
       reduceQuery.removeEventListener("change", setReduce);
+      mobileQuery.removeEventListener("change", setMobile);
     };
   }, []);
 
