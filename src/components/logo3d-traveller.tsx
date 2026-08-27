@@ -16,9 +16,39 @@ const MODEL_ASPECT = 1.341;
 const RAIL: "right" | "left" = "right"; // flip to "left" to stick the travelling logo to the left edge
 const FALLBACK_BRAND = "#3fe3ae";
 
+// The journey only runs where the page has a genuinely empty margin. Sections are a
+// centered max-w-6xl (72rem) column with px-6 padding, so the empty gutter beside the
+// content is vw/2 - 552px. The model travels THERE and nowhere else — never across
+// text — and it hugs the right edge of the screen.
+const EDGE_PAD = 8; // gap between the model and the screen edge / content column edge
+const TRAVEL_MAX_H = 170; // px cap for the travelling model height
+const TRAVEL_MIN_H = 64; // below this the model is unreadable — stay docked in the hero instead
+const TRAVEL_W_PER_H = 1.75; // travel footprint width per height, incl. rotation margin
+const HALO_PER_H = 2.2; // halo diameter as a multiple of the model height
+
 const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
 const smoothstep = (t: number) => t * t * (3 - 2 * t);
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+
+// Edge of the page's content column (max-w-6xl sections, px-4 sm:px-6 padding) on the
+// travel side; the empty margin is the viewport span between this edge and the screen.
+function contentEdge(vw: number): number {
+  const half = vw / 2;
+  const right = half + Math.min(576, Math.max(0, half - 24));
+  return RAIL === "left" ? vw - right : right;
+}
+
+// Width available for the travelling model inside the empty margin (both edge pads applied).
+function travelWidth(vw: number): number {
+  const edge = contentEdge(vw);
+  return (RAIL === "left" ? edge : vw - edge) - EDGE_PAD * 2;
+}
+
+// Canvas DPR: slight supersampling on 1x screens, capped at native-ish 2x — 3x was
+// melting GPUs (2.25x more pixels per frame for no visible gain).
+function canvasDpr(): number {
+  return clamp((window.devicePixelRatio || 1) * 1.25, 1.25, 2);
+}
 
 // Read the resolved --brand token and convert it (oklch etc.) to #rrggbb via canvas.
 function resolveBrandHex(): string {
@@ -50,11 +80,40 @@ export function LogoTraveller() {
     return () => cancelAnimationFrame(raf);
   }, [theme]);
 
-  // small screens render the scene IN the hero lockup (natively scrolled, zero lag);
-  // large screens use the fixed travelling overlay
-  const [isMobile, setIsMobile] = React.useState(false);
+  // "in-flow" screens render the scene INSIDE the hero lockup (natively scrolled, zero
+  // lag): small screens, and desktops whose empty right gutter can't fit a readable
+  // travelling model. Large screens use the fixed travelling overlay, confined to the
+  // empty gutter.
+  const [inFlow, setInFlow] = React.useState(false);
   const [slotEl, setSlotEl] = React.useState<HTMLElement | null>(null);
-  const isMobileRef = React.useRef(false);
+  const inFlowRef = React.useRef(false);
+
+  // keep first paint light: the three.js chunk + WebGL init start only once the page
+  // has loaded and the main thread goes idle
+  const [sceneOn, setSceneOn] = React.useState(false);
+  React.useEffect(() => {
+    let idleId = 0;
+    let toId = 0;
+    const allow = () => setSceneOn(true);
+    const kick = () => {
+      if (typeof window.requestIdleCallback === "function") {
+        idleId = window.requestIdleCallback(allow, { timeout: 2500 });
+      } else {
+        toId = window.setTimeout(allow, 1200);
+      }
+    };
+    if (document.readyState === "complete") {
+      kick();
+    } else {
+      window.addEventListener("load", kick, { once: true });
+      toId = window.setTimeout(kick, 4000); // load can stall on slow third parties
+    }
+    return () => {
+      if (idleId) window.cancelIdleCallback(idleId);
+      if (toId) window.clearTimeout(toId);
+      window.removeEventListener("load", kick);
+    };
+  }, []);
 
   const motionRef = React.useRef<Logo3DMotion>({
     u: 0,
@@ -63,7 +122,7 @@ export function LogoTraveller() {
     gTravel: 1,
     gPark: 1,
     reduce: false,
-    mobile: false,
+    inFlow: false,
   });
   const [layout, setLayout] = React.useState({ w: 320, h: 320, dpr: 2, ready: false });
 
@@ -73,63 +132,68 @@ export function LogoTraveller() {
     setReduce();
     reduceQuery.addEventListener("change", setReduce);
 
-    // on small screens the 3D model never travels — it lives inside the hero lockup
     const mobileQuery = window.matchMedia("(max-width: 767px)");
-    const applyMobile = () => {
-      isMobileRef.current = mobileQuery.matches;
-      motionRef.current.mobile = mobileQuery.matches;
-      // rAF: setState in media-query callbacks is fine, but this keeps it out of sync effects
-      requestAnimationFrame(() => setIsMobile(mobileQuery.matches));
-    };
-    applyMobile();
-    mobileQuery.addEventListener("change", applyMobile);
 
     let vw = window.innerWidth;
     let vh = window.innerHeight;
     let side = 320;
-    let modelH = 140;
+    let travelH = 0; // travelling model height — sized to fit the empty gutter
+    let parkH = 140; // parked model height — contain-fits the hero mark slot
     let maxScroll = 1;
+
+    // decide the mode + travel size from the current viewport
+    const evalMode = () => {
+      vw = window.innerWidth;
+      travelH = clamp(travelWidth(vw) / TRAVEL_W_PER_H, 0, TRAVEL_MAX_H);
+      inFlowRef.current = mobileQuery.matches || travelH < TRAVEL_MIN_H;
+      motionRef.current.inFlow = inFlowRef.current;
+    };
+    const syncFlowState = () => {
+      requestAnimationFrame(() => setInFlow(inFlowRef.current));
+    };
 
     // canvas sizing for the active mode; recomputed lazily because the hero entrance
     // animation rescales the slot early on
     const computeSizes = () => {
-      modelH = clamp(Math.min(vh * 0.17, vw * 0.26), 90, 170);
       const slot = document.getElementById("hero-logo-mark");
-      if (!slot) return { side, parkH: modelH, slotW: 0, slotH: 0 };
+      if (!slot) return null;
       const r = slot.getBoundingClientRect();
-      const parkH = Math.max(40, Math.min(r.height, r.width / MODEL_ASPECT));
-      if (isMobileRef.current) {
+      parkH = Math.max(40, Math.min(r.height, r.width / MODEL_ASPECT));
+      if (inFlowRef.current) {
         // in-flow canvas exactly fills the mark slot
-        return { side: Math.round(r.height), parkH, slotW: r.width, slotH: r.height };
+        return { side: Math.round(r.height), slotW: r.width, slotH: r.height };
       }
-      return { side: Math.round(Math.max(modelH, parkH) * 2.24), parkH, slotW: r.width, slotH: r.height };
+      return { side: Math.round(Math.max(travelH, parkH) * 2.24), slotW: r.width, slotH: r.height };
     };
 
     const measure = () => {
       vw = window.innerWidth;
       vh = window.innerHeight;
       maxScroll = Math.max(1, document.documentElement.scrollHeight - vh);
-      const { side: s, parkH } = computeSizes();
-      side = s;
+      evalMode();
+      syncFlowState();
       setSlotEl((prev) => prev ?? document.getElementById("hero-logo-mark"));
 
+      const sizes = computeSizes();
+      if (!sizes) return;
+      side = sizes.side;
+
       const k = 0.2782; // rendered model height per unit of WebGL group scale, as a fraction of canvas height
-      if (isMobileRef.current) {
-        const { slotW, slotH } = computeSizes();
-        motionRef.current.gPark = clamp(parkH / (k * slotH), 0.3, 2.4);
+      if (inFlowRef.current) {
+        motionRef.current.gPark = clamp(parkH / (k * sizes.slotH), 0.3, 2.4);
         motionRef.current.gTravel = motionRef.current.gPark;
         setLayout((prev) =>
-          prev.ready && Math.abs(prev.w - slotW) < 2 && Math.abs(prev.h - slotH) < 2
+          prev.ready && Math.abs(prev.w - sizes.slotW) < 2 && Math.abs(prev.h - sizes.slotH) < 2
             ? prev
-            : { w: Math.round(slotW), h: Math.round(slotH), dpr: Math.min(3, (window.devicePixelRatio || 1) * 1.5), ready: true },
+            : { w: Math.round(sizes.slotW), h: Math.round(sizes.slotH), dpr: canvasDpr(), ready: true },
         );
       } else {
-        motionRef.current.gTravel = clamp(modelH / (k * side), 0.3, 2.4);
+        motionRef.current.gTravel = clamp(travelH / (k * side), 0.3, 2.4);
         motionRef.current.gPark = clamp(parkH / (k * side), 0.3, 2.4);
         setLayout((prev) =>
           prev.ready && Math.abs(prev.w - side) < 2 && Math.abs(prev.h - side) < 2
             ? prev
-            : { w: side, h: side, dpr: Math.min(3, (window.devicePixelRatio || 1) * 1.5), ready: true },
+            : { w: side, h: side, dpr: canvasDpr(), ready: true },
         );
       }
     };
@@ -143,8 +207,9 @@ export function LogoTraveller() {
     let velEma = 0;
     let frame = 0;
     let first = true;
+    let reveal = 0; // first-load fade-in of the whole travelling overlay
     // only touch the DOM when a value actually moved — avoids repainting the blurred glow every frame
-    let lastX = NaN, lastY = NaN, lastGlowO = -1, lastGlowS = -1;
+    let lastX = NaN, lastY = NaN, lastVis = -1, lastGlowO = -1, lastGlowS = -1;
     let textDock = 1, lastTextTx = -999;
 
     const tick = () => {
@@ -157,20 +222,20 @@ export function LogoTraveller() {
       if (frame % 90 === 0) maxScroll = Math.max(1, document.documentElement.scrollHeight - vh);
       // self-correct sizing after late layout shifts (hero entrance animation, font load)
       if (frame % 45 === 0) {
-        const { side: next } = computeSizes();
-        if (Math.abs(next - side) > 2) measure();
+        const next = computeSizes();
+        if (next && Math.abs(next.side - side) > 2) measure();
       }
 
       const reduce = motionRef.current.reduce;
       const u = clamp(y / maxScroll, 0, 1);
-      // mobile / reduced motion: always parked — the in-flow canvas scrolls natively, zero lag
-      const dock = reduce || motionRef.current.mobile ? 1 : smoothstep(clamp(1 - y / 150, 0, 1));
+      // in-flow / reduced motion: always parked — the in-flow canvas scrolls natively, zero lag
+      const dock = reduce || motionRef.current.inFlow ? 1 : smoothstep(clamp(1 - y / 150, 0, 1));
 
       motionRef.current.u = u;
       motionRef.current.vel = velEma;
       motionRef.current.dock = dock;
 
-      if (isMobileRef.current) {
+      if (inFlowRef.current) {
         // in-flow mode: the canvas is part of the hero — nothing to position
         if (first) { first = false; }
         return;
@@ -190,10 +255,13 @@ export function LogoTraveller() {
         parkCy = r.top + r.height / 2;
       }
 
-      // travel: stick to the side rail, ride down with the scroll
-      const inset = vw < 640 ? 10 : 18;
-      const railX = RAIL === "left" ? half + inset : vw - half - inset;
-      const travelCx = railX + Math.sin(u * Math.PI * 5) * 9; // subtle wiggle while stuck to the rail
+      // travel: hug the right screen edge inside the empty margin beside the content
+      // column — the model never crosses onto text, it rides the blank edge down the page
+      const usableW = travelWidth(vw);
+      const footprint = travelH * TRAVEL_W_PER_H;
+      const railCx = RAIL === "left" ? EDGE_PAD + footprint / 2 : vw - EDGE_PAD - footprint / 2;
+      const wiggleAmp = Math.min(9, Math.max(0, (usableW - footprint) / 2));
+      const travelCx = railCx + Math.sin(u * Math.PI * 5) * wiggleAmp; // subtle wiggle inside the gutter
       const travelCy = lerp(vh * 0.2, vh - half - 44, smoothstep(u));
 
       const cx = lerp(travelCx, parkCx, dock);
@@ -208,10 +276,29 @@ export function LogoTraveller() {
         wrap.style.transform = `translate3d(${tx.toFixed(1)}px, ${ty.toFixed(1)}px, 0)`;
       }
 
+      // hand-off visibility: the model dissolves while it crosses the hero wordmark
+      // between the park slot and the rail — it is never SEEN over text
+      // (visible parked at dock≈1 and travelling at dock≈0, invisible in between)
+      const fade =
+        1 -
+        clamp(Math.min((dock - 0.08) / 0.08, (0.97 - dock) / 0.08), 0, 1);
+      reveal += (1 - reveal) * 0.1;
+      const vis = reveal * fade;
+      if (first) {
+        first = false;
+        lastVis = -1; // force the first opacity write
+      }
+      if (Math.abs(vis - lastVis) > 0.02) {
+        lastVis = vis;
+        wrap.style.opacity = vis.toFixed(3);
+      }
+
       if (glowRef.current) {
         const speed = Math.min(Math.abs(velEma), 120);
-        const gOpacity = (0.35 + Math.min(0.45, speed * 0.003)) * (1 - dock * 0.8);
-        const gScale = lerp(motionRef.current.gTravel, motionRef.current.gPark, dock) * 0.75;
+        const gOpacity = (0.35 + Math.min(0.45, speed * 0.003)) * (1 - dock * 0.8) * fade * reveal;
+        // halo tracks the model's pixel size (not the canvas), so the glow stays over
+        // the blank margin instead of washing across the content column
+        const gScale = (lerp(travelH, parkH, dock) * HALO_PER_H) / (side * 1.36);
         if (Math.abs(gOpacity - lastGlowO) > 0.02 || Math.abs(gScale - lastGlowS) > 0.004) {
           lastGlowO = gOpacity;
           lastGlowS = gScale;
@@ -233,11 +320,6 @@ export function LogoTraveller() {
           heroText.style.transform = `translateX(${tx.toFixed(2)}%)`;
         }
       }
-
-      if (first) {
-        first = false;
-        wrap.style.opacity = "1";
-      }
     };
     raf = requestAnimationFrame(tick);
 
@@ -246,22 +328,21 @@ export function LogoTraveller() {
       ro.disconnect();
       window.removeEventListener("resize", measure);
       reduceQuery.removeEventListener("change", setReduce);
-      mobileQuery.removeEventListener("change", applyMobile);
       cancelAnimationFrame(initialRaf);
     };
   }, []);
 
-  const scene = layout.ready ? (
+  const scene = sceneOn && layout.ready ? (
     <Logo3DScene motionRef={motionRef} theme={theme} brandHex={brandHex} dpr={layout.dpr} />
   ) : null;
 
-  if (isMobile && slotEl) {
+  if (inFlow && slotEl) {
     // in-flow: rendered inside the hero mark slot — the browser scrolls it natively (zero lag)
     return createPortal(
       <div
         aria-hidden
         className="pointer-events-none absolute inset-0"
-        style={{ opacity: layout.ready ? 1 : 0, transition: "opacity 500ms" }}
+        style={{ opacity: sceneOn && layout.ready ? 1 : 0, transition: "opacity 500ms" }}
       >
         <div
           className="absolute inset-[-12%] rounded-full blur-2xl"
@@ -281,10 +362,10 @@ export function LogoTraveller() {
     <div
       ref={wrapRef}
       aria-hidden
-      className="pointer-events-none fixed top-0 left-0 z-40 opacity-0 transition-opacity duration-500 will-change-transform"
+      className="pointer-events-none fixed top-0 left-0 z-40 opacity-0 will-change-transform"
       style={{ width: layout.w, height: layout.h }}
     >
-      {/* mint halo behind the model */}
+      {/* mint halo behind the model — sized to the model in the tick, not the canvas */}
       <div
         ref={glowRef}
         className="absolute -inset-[18%] rounded-full blur-2xl"

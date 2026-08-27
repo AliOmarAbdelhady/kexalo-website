@@ -15,7 +15,7 @@ export type Logo3DMotion = {
   gTravel: number; // WebGL group scale for the travelling size
   gPark: number; // WebGL group scale that fits the model over the hero mark slot
   reduce: boolean; // prefers-reduced-motion
-  mobile: boolean; // small screens: the model never travels, it sticks to the lockup
+  inFlow: boolean; // in-flow screens (small, or no empty gutter): the model never travels, it sticks to the lockup
 };
 
 const X_COLOR_DARK = "#f1f3f7"; // white-silver metal on the dark site
@@ -184,8 +184,8 @@ export default function Logo3DScene({
 }) {
   return (
     <Canvas
-      dpr={dpr} // fixed supersampling factor (can exceed devicePixelRatio for crispness)
-      gl={{ antialias: true, alpha: true, powerPreference: "high-performance" }}
+      dpr={dpr} // supersampling factor from the traveller (capped at 2 to keep the GPU cool)
+      gl={{ antialias: dpr < 1.75, alpha: true, powerPreference: "high-performance" }} // hi-DPI supersampling already antialiases
       camera={{ fov: 30, position: [0, 0, 10], near: 0.1, far: 100 }}
       style={{ width: "100%", height: "100%", background: "transparent" }}
       onCreated={({ gl, scene }) => {
