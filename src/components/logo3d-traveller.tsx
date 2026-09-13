@@ -124,7 +124,57 @@ export function LogoTraveller() {
     reduce: false,
     inFlow: false,
   });
-  const [layout, setLayout] = React.useState({ w: 320, h: 320, dpr: 2, ready: false });
+  const [layout, setLayout] = React.useState({ w: 320, h: 320, dpr: 2, ready: false, logoH: 140 });
+
+  // drag-to-scroll state: grabbing the model acts exactly like dragging the scrollbar
+  // thumb — but the logo sticks to the cursor in BOTH axes while held, and glides back
+  // to its rail home when released
+  const drag = React.useRef({ active: false, startY: 0, startScroll: 0, offX: 0, offY: 0, posX: 0, posY: 0 });
+  const returning = React.useRef(false);
+  const float = React.useRef({ x: 0, y: 0, init: false });
+
+  const onGrabPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!e.isPrimary) return;
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const r = wrapRef.current?.getBoundingClientRect();
+    const cx = r ? r.x + r.width / 2 : e.clientX;
+    const cy = r ? r.y + r.height / 2 : e.clientY;
+    drag.current = {
+      active: true,
+      startY: e.clientY,
+      startScroll: window.scrollY,
+      offX: cx - e.clientX, // keep the grab offset — the logo sticks to the mouse, no snap
+      offY: cy - e.clientY,
+      posX: cx,
+      posY: cy,
+    };
+    returning.current = false;
+    e.currentTarget.style.cursor = "grabbing";
+  };
+  const onGrabPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!drag.current.active) return;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const scrollHeight = document.documentElement.scrollHeight;
+    const maxScroll = Math.max(1, scrollHeight - vh);
+    const thumbH = (vh / scrollHeight) * vh;
+    const dy = e.clientY - drag.current.startY;
+    // vertical drag scrolls the page (screen only ever moves up/down)…
+    const next = drag.current.startScroll + dy * (maxScroll / Math.max(1, vh - thumbH));
+    window.scrollTo({ top: clamp(next, 0, maxScroll), behavior: "instant" });
+    // …while the logo itself follows the cursor freely in both axes, kept on-screen
+    const half = (layout.logoH * MODEL_ASPECT) / 2;
+    const halfH = layout.logoH / 2;
+    drag.current.posX = clamp(e.clientX + drag.current.offX, half + 4, vw - half - 4);
+    drag.current.posY = clamp(e.clientY + drag.current.offY, halfH + 4, vh - halfH - 4);
+  };
+  const endGrab = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!drag.current.active) return;
+    drag.current.active = false;
+    returning.current = true; // glide back to the rail / park home
+    e.currentTarget.style.cursor = "grab";
+  };
 
   React.useEffect(() => {
     const reduceQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -185,7 +235,7 @@ export function LogoTraveller() {
         setLayout((prev) =>
           prev.ready && Math.abs(prev.w - sizes.slotW) < 2 && Math.abs(prev.h - sizes.slotH) < 2
             ? prev
-            : { w: Math.round(sizes.slotW), h: Math.round(sizes.slotH), dpr: canvasDpr(), ready: true },
+            : { w: Math.round(sizes.slotW), h: Math.round(sizes.slotH), dpr: canvasDpr(), ready: true, logoH: Math.round(parkH) },
         );
       } else {
         motionRef.current.gTravel = clamp(travelH / (k * side), 0.3, 2.4);
@@ -193,7 +243,7 @@ export function LogoTraveller() {
         setLayout((prev) =>
           prev.ready && Math.abs(prev.w - side) < 2 && Math.abs(prev.h - side) < 2
             ? prev
-            : { w: side, h: side, dpr: canvasDpr(), ready: true },
+            : { w: side, h: side, dpr: canvasDpr(), ready: true, logoH: Math.round(Math.max(travelH, parkH)) },
         );
       }
     };
@@ -255,17 +305,43 @@ export function LogoTraveller() {
         parkCy = r.top + r.height / 2;
       }
 
-      // travel: hug the right screen edge inside the empty margin beside the content
-      // column — the model never crosses onto text, it rides the blank edge down the page
+      // travel: the model rides EXACTLY at the scrollbar thumb's center — linear 1:1
+      // with the page scroll (same level as the thumb at every scroll position)
+      const scrollHeight = maxScroll + vh;
+      const thumbH = (vh / scrollHeight) * vh; // browser thumb length (this page is far above the min-thumb clamp)
       const usableW = travelWidth(vw);
       const footprint = travelH * TRAVEL_W_PER_H;
       const railCx = RAIL === "left" ? EDGE_PAD + footprint / 2 : vw - EDGE_PAD - footprint / 2;
-      const wiggleAmp = Math.min(9, Math.max(0, (usableW - footprint) / 2));
-      const travelCx = railCx + Math.sin(u * Math.PI * 5) * wiggleAmp; // subtle wiggle inside the gutter
-      const travelCy = lerp(vh * 0.2, vh - half - 44, smoothstep(u));
+      const wiggleAmp = drag.current.active ? 0 : Math.min(9, Math.max(0, (usableW - footprint) / 2));
+      const travelCx = railCx + Math.sin(u * Math.PI * 5) * wiggleAmp;
+      const travelCy = u * (vh - thumbH) + thumbH / 2;
 
-      const cx = lerp(travelCx, parkCx, dock);
-      const cy = lerp(travelCy, parkCy, dock);
+      // positioning: while grabbed the logo is stuck to the cursor in both axes (any
+      // direction is fine — only the SCREEN is restricted to up/down); on release it
+      // glides back to its home spot (rail at thumb level, or the park slot at the top)
+      const targetCx = lerp(travelCx, parkCx, dock);
+      const targetCy = lerp(travelCy, parkCy, dock);
+      let cx = targetCx;
+      let cy = targetCy;
+      if (drag.current.active) {
+        cx = drag.current.posX;
+        cy = drag.current.posY;
+        float.current.x = cx;
+        float.current.y = cy;
+        float.current.init = true;
+      } else if (returning.current && float.current.init) {
+        float.current.x += (targetCx - float.current.x) * 0.16;
+        float.current.y += (targetCy - float.current.y) * 0.16;
+        if (Math.abs(targetCx - float.current.x) + Math.abs(targetCy - float.current.y) < 1) {
+          returning.current = false;
+        } else {
+          cx = float.current.x;
+          cy = float.current.y;
+        }
+      } else {
+        returning.current = false;
+      }
+      const held = drag.current.active || returning.current;
 
       // translate only — all scaling happens inside WebGL so the canvas is never measured scaled
       const tx = cx - half;
@@ -283,7 +359,8 @@ export function LogoTraveller() {
         1 -
         clamp(Math.min((dock - 0.08) / 0.08, (0.97 - dock) / 0.08), 0, 1);
       reveal += (1 - reveal) * 0.1;
-      const vis = reveal * fade;
+      // while held (or gliding home) the logo stays visible — the user is carrying it
+      const vis = reveal * (held ? 1 : fade);
       if (first) {
         first = false;
         lastVis = -1; // force the first opacity write
@@ -295,7 +372,7 @@ export function LogoTraveller() {
 
       if (glowRef.current) {
         const speed = Math.min(Math.abs(velEma), 120);
-        const gOpacity = (0.35 + Math.min(0.45, speed * 0.003)) * (1 - dock * 0.8) * fade * reveal;
+        const gOpacity = (0.35 + Math.min(0.45, speed * 0.003)) * (1 - dock * 0.8) * (held ? 1 : fade) * reveal;
         // halo tracks the model's pixel size (not the canvas), so the glow stays over
         // the blank margin instead of washing across the content column
         const gScale = (lerp(travelH, parkH, dock) * HALO_PER_H) / (side * 1.36);
@@ -373,6 +450,20 @@ export function LogoTraveller() {
           background:
             "radial-gradient(circle at 50% 50%, color-mix(in oklch, var(--brand) 55%, transparent), transparent 65%)",
         }}
+      />
+      {/* drag handle: grab the model to scroll the page, exactly like the scrollbar thumb.
+          z-10 keeps it above the R3F canvas container so pointer events land here. */}
+      <div
+        className="absolute left-1/2 top-1/2 z-10 -translate-x-1/2 -translate-y-1/2 cursor-grab touch-none select-none"
+        style={{
+          width: Math.round(layout.logoH * MODEL_ASPECT + 28),
+          height: Math.round(layout.logoH + 28),
+          pointerEvents: layout.ready ? "auto" : "none",
+        }}
+        onPointerDown={onGrabPointerDown}
+        onPointerMove={onGrabPointerMove}
+        onPointerUp={endGrab}
+        onPointerCancel={endGrab}
       />
       {scene}
     </div>

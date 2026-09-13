@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono, Space_Grotesk } from "next/font/google";
 import { ThemeProvider } from "@/components/theme-provider";
+import { ChatWidget } from "@/components/chat/chat-widget";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -118,6 +119,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
           disableTransitionOnChange
         >
           {children}
+          <ChatWidget />
         </ThemeProvider>
       </body>
     </html>
